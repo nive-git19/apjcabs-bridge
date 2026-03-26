@@ -22,8 +22,7 @@ e1EPg8qQlS1fQa8IKbGC34s9oMfKdRyhk9Ab8nv7m0tZycViZmzAcnQr6l8y6U
 
 // ─── CONFIG ───────────────────────────────────────────────
 const FRESHCHAT_TOKEN  = process.env.FRESHCHAT_TOKEN;
-const ACCOUNT_ID       = '1108501973785697';
-const FRESHCHAT_DOMAIN = 'https://apjcabs.myfreshworks.com';
+const FRESHCHAT_DOMAIN = 'https://cabs-952462514711362027-d37d39c8fb1f00417734408.freshchat.com/v2';
 
 // ─── PERSISTENT FILE STORE ───────────────────────────────
 // /tmp persists across requests on Render free tier
@@ -167,7 +166,7 @@ app.get('/get-latest-conv', async (req, res) => {
     }
 
     const response = await fetch(
-      `${FRESHCHAT_DOMAIN}/crm/messaging/a/${ACCOUNT_ID}/api/v2/conversations?status=open&sort_by=last_activity&sort_order=desc&items_per_page=1`,
+      `${FRESHCHAT_DOMAIN}/conversations?sort_by=last_activity&sort_order=desc&items_per_page=1`,
       {
         headers: {
           'Authorization': `Bearer ${FRESHCHAT_TOKEN}`,
@@ -217,7 +216,7 @@ app.post('/send-summary', async (req, res) => {
       return res.status(500).json({ error: 'FRESHCHAT_TOKEN not set' });
     }
 
-    const fcUrl = `${FRESHCHAT_DOMAIN}/crm/messaging/a/${ACCOUNT_ID}/api/v2/conversations/${conversation_id}/messages`;
+    const fcUrl = `${FRESHCHAT_DOMAIN}/conversations/${conversation_id}/messages`;
 
     console.log('Calling Freshchat API:', fcUrl);
 
@@ -229,7 +228,6 @@ app.post('/send-summary', async (req, res) => {
       },
       body: JSON.stringify({
         message_parts: [{ text: { content: summary } }],
-        actor_type   : 'agent',
         message_type : 'normal'
       })
     });
