@@ -3,18 +3,30 @@ const cors    = require('cors');
 const fetch   = require('node-fetch');
 const fs      = require('fs');
 const path    = require('path');
+const crypto  = require('crypto');
 
 const app = express();
 app.use(cors());
-app.use(express.json());
 
+// ─── FRESHCHAT RSA PUBLIC KEY ─────────────────────────────
+// Used to verify webhook signatures from Freshchat
+const FRESHCHAT_PUBLIC_KEY = `-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArHZszshUHWqi13n1K5p
+57GGCbp9alQUen+Cp+1OztrhTqeaUxC/LifqQnlOJf1/qXvA9AnGFzNm2wXjgI
+pN1WfmvY6j2/p5pCp2bROHxKliZrBmcaPNaXxleewYW+0d2d+dP0gmzyUDox30
+XQUZPhtWaYFyTAtFNQ+q1Y/jAhJslgVv879AXgBk3YFMjxPk+enRajCtroiU0G
+EL+k1SdzCIhY8Ju/XqBuQq2/kObikloN87ilUt03Ue/tT2/Ehh3ctjqoUhRuP3
+e1EPg8qQlS1fQa8IKbGC34s9oMfKdRyhk9Ab8nv7m0tZycViZmzAcnQr6l8y6U
++7kJEQ7g4trIwIDAQAB
+-----END PUBLIC KEY-----`;
+
+// ─── CONFIG ───────────────────────────────────────────────
 const FRESHCHAT_TOKEN  = process.env.FRESHCHAT_TOKEN;
 const ACCOUNT_ID       = '1108501973785697';
 const FRESHCHAT_DOMAIN = 'https://apjcabs.myfreshworks.com';
 
-// ─── PERSISTENT STORAGE ──────────────────────────────────
-// Render free tier spins down and loses memory
-// We write conv_id to a file so it survives restarts
+// ─── PERSISTENT FILE STORE ───────────────────────────────
+// /tmp persists across requests on Render free tier
 const STORE_FILE = path.join('/tmp', 'apj_conv_store.json');
 
 function readStore() {
@@ -22,21 +34,31 @@ function readStore() {
     if (fs.existsSync(STORE_FILE)) {
       return JSON.parse(fs.readFileSync(STORE_FILE, 'utf8'));
     }
-  } catch(e) {}
+  } catch(e) { console.error('Read store error:', e.message); }
   return { latestConvId: null, convMap: {} };
 }
 
 function writeStore(data) {
   try {
     fs.writeFileSync(STORE_FILE, JSON.stringify(data), 'utf8');
-  } catch(e) {
-    console.error('Write store error:', e.message);
-  }
+  } catch(e) { console.error('Write store error:', e.message); }
 }
 
-// Load on startup
 let store = readStore();
 console.log('Loaded store on startup:', store.latestConvId || 'empty');
+
+// ─── SIGNATURE VERIFICATION ───────────────────────────────
+function verifySignature(rawBody, signature) {
+  try {
+    const verify = crypto.createVerify('SHA256');
+    verify.update(rawBody);
+    const isValid = verify.verify(FRESHCHAT_PUBLIC_KEY, signature, 'base64');
+    return isValid;
+  } catch(e) {
+    console.error('Signature verify error:', e.message);
+    return false;
+  }
+}
 
 // ─────────────────────────────────────────────────────────
 // GET / — health check
@@ -46,85 +68,134 @@ app.get('/', (req, res) => {
   res.json({
     status      : 'APJ Cabs Bridge Running ✅',
     latestConvId: store.latestConvId || 'none',
-    stored      : Object.keys(store.convMap || {}).length
+    token_set   : !!FRESHCHAT_TOKEN
   });
 });
 
 // ─────────────────────────────────────────────────────────
 // POST /webhook — Freshchat fires this on events
-// Payload docs: data.message.conversation_id (message_create)
+// Uses raw body parser to verify RSA signature
 // ─────────────────────────────────────────────────────────
-app.post('/webhook', async (req, res) => {
-  try {
-    const body   = req.body;
-    const action = body?.action;
+app.post('/webhook',
+  express.raw({ type: '*/*' }),
+  async (req, res) => {
+    try {
+      const rawBody  = req.body.toString('utf8');
+      const signature = req.headers['x-freshchat-signature'];
 
-    console.log('Webhook received — action:', action);
+      console.log('=== WEBHOOK HIT ===');
+      console.log('Signature header:', signature ? 'present' : 'missing');
 
-    let convId = null;
-    let userId = null;
+      // Verify signature if present
+      if (signature) {
+        const isValid = verifySignature(rawBody, signature);
+        console.log('Signature valid:', isValid);
+        if (!isValid) {
+          console.log('❌ Invalid signature');
+          return res.sendStatus(401);
+        }
+      }
 
-    if (action === 'message_create') {
-      // Per Freshchat docs: data.message.conversation_id
-      convId = body?.data?.message?.conversation_id;
-      userId = body?.data?.message?.user_id ||
-               body?.actor?.actor_id;
+      const body   = JSON.parse(rawBody);
+      const action = body?.action;
+      console.log('Action:', action);
+
+      let convId = null;
+      let userId = null;
+
+      if (action === 'message_create') {
+        convId = body?.data?.message?.conversation_id;
+        userId = body?.data?.message?.user_id ||
+                 body?.actor?.actor_id;
+      } else if (action === 'conversation_assignment') {
+        convId = body?.data?.assignment?.conversation?.conversation_id;
+        userId = body?.actor?.actor_id;
+      } else if (action === 'conversation_resolution') {
+        convId = body?.data?.resolve?.conversation?.conversation_id;
+        userId = body?.actor?.actor_id;
+      } else if (action === 'conversation_reopen') {
+        convId = body?.data?.reopen?.conversation?.conversation_id;
+        userId = body?.actor?.actor_id;
+      }
+
+      console.log('convId:', convId);
+      console.log('userId:', userId);
+
+      if (convId) {
+        store = readStore();
+        store.latestConvId = convId;
+        if (userId) store.convMap[userId] = convId;
+        writeStore(store);
+        console.log('✅ Stored conv_id:', convId);
+      } else {
+        console.log('⚠️ No conv_id found — action:', action);
+        console.log('Full body:', rawBody);
+      }
+
+      res.sendStatus(200);
+    } catch(e) {
+      console.error('Webhook error:', e.message);
+      res.sendStatus(200); // always 200 to Freshchat
     }
-    else if (action === 'conversation_assignment') {
-      convId = body?.data?.assignment?.conversation?.conversation_id;
-      userId = body?.data?.assignment?.to_agent_id ||
-               body?.actor?.actor_id;
-    }
-    else if (action === 'conversation_resolution') {
-      convId = body?.data?.resolve?.conversation?.conversation_id;
-      userId = body?.actor?.actor_id;
-    }
-    else if (action === 'conversation_reopen') {
-      convId = body?.data?.reopen?.conversation?.conversation_id;
-      userId = body?.actor?.actor_id;
-    }
-
-    console.log('Extracted convId:', convId);
-    console.log('Extracted userId:', userId);
-
-    if (convId) {
-      store = readStore();
-      store.latestConvId = convId;
-      if (userId) store.convMap[userId] = convId;
-      writeStore(store);
-      console.log(`✅ Stored conv_id: ${convId}`);
-    } else {
-      console.log('⚠️ No conv_id in this payload — action:', action);
-    }
-
-    res.sendStatus(200);
-  } catch (e) {
-    console.error('Webhook error:', e.message);
-    res.sendStatus(200);
   }
-});
+);
 
 // ─────────────────────────────────────────────────────────
-// GET /get-conv-id — HTML quote page calls this on load
+// GET /get-conv-id — HTML page calls this on load
+// Returns stored conv_id from webhook
 // ─────────────────────────────────────────────────────────
+app.use(express.json());
+
 app.get('/get-conv-id', (req, res) => {
   store = readStore();
-
-  const userId = req.query.user_id;
-  let convId   = null;
-
-  if (userId && store.convMap?.[userId]) {
-    convId = store.convMap[userId];
-  } else {
-    convId = store.latestConvId;
-  }
-
+  const convId = store.latestConvId;
   console.log('GET /get-conv-id →', convId || 'null');
-
   res.json({
     conversation_id : convId,
     found           : !!convId
   });
+});
+
+// ─────────────────────────────────────────────────────────
+// GET /get-latest-conv — fallback: fetch from Freshchat API
+// Called if webhook hasn't fired yet
+// ─────────────────────────────────────────────────────────
+app.get('/get-latest-conv', async (req, res) => {
+  try {
+    if (!FRESHCHAT_TOKEN) {
+      return res.status(500).json({ error: 'FRESHCHAT_TOKEN not set' });
+    }
+
+    const response = await fetch(
+      `${FRESHCHAT_DOMAIN}/crm/messaging/a/${ACCOUNT_ID}/api/v2/conversations?status=open&sort_by=last_activity&sort_order=desc&items_per_page=1`,
+      {
+        headers: {
+          'Authorization': `Bearer ${FRESHCHAT_TOKEN}`,
+          'Content-Type' : 'application/json'
+        }
+      }
+    );
+
+    const data = await response.json();
+    console.log('Freshchat conversations API:', response.status);
+
+    const conv = data?.conversations?.[0];
+
+    if (conv) {
+      // Store it for future use
+      store = readStore();
+      store.latestConvId = conv.id;
+      writeStore(store);
+      console.log('✅ Got conv from API:', conv.id);
+      res.json({ conversation_id: conv.id, found: true });
+    } else {
+      console.log('No open conversations found');
+      res.json({ conversation_id: null, found: false });
+    }
+  } catch(e) {
+    console.error('Get latest conv error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // ─────────────────────────────────────────────────────────
@@ -148,7 +219,7 @@ app.post('/send-summary', async (req, res) => {
 
     const fcUrl = `${FRESHCHAT_DOMAIN}/crm/messaging/a/${ACCOUNT_ID}/api/v2/conversations/${conversation_id}/messages`;
 
-    console.log('Calling Freshchat:', fcUrl);
+    console.log('Calling Freshchat API:', fcUrl);
 
     const response = await fetch(fcUrl, {
       method  : 'POST',
@@ -171,8 +242,7 @@ app.post('/send-summary', async (req, res) => {
     } else {
       res.status(response.status).json({ error: result });
     }
-
-  } catch (e) {
+  } catch(e) {
     console.error('Send summary error:', e.message);
     res.status(500).json({ error: e.message });
   }
