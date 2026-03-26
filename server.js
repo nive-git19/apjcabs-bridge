@@ -261,5 +261,46 @@ app.get('/debug', (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────
+// GET /list-agents — fetch agents from Freshchat (debug)
+// ─────────────────────────────────────────────────────────
+app.get('/list-agents', async (req, res) => {
+  try {
+    const response = await fetch(`${FRESHCHAT_DOMAIN}/agents`, {
+      headers: {
+        'Authorization': `Bearer ${FRESHCHAT_TOKEN}`,
+        'Content-Type': 'application/json'
+      }
+    });
+    const data = await response.json();
+    const agents = (data.agents || []).map(a => ({
+      id: a.id,
+      name: `${a.first_name || ''} ${a.last_name || ''}`.trim(),
+      email: a.email
+    }));
+    res.json({ agents });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────
+// GET /check-conv/:id — fetch conversation details (debug)
+// ─────────────────────────────────────────────────────────
+app.get('/check-conv/:id', async (req, res) => {
+  try {
+    const response = await fetch(`${FRESHCHAT_DOMAIN}/conversations/${req.params.id}`, {
+      headers: {
+        'Authorization': `Bearer ${FRESHCHAT_TOKEN}`,
+        'Content-Type': 'application/json'
+      }
+    });
+    const data = await response.json();
+    res.json(data);
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`APJ Cabs Bridge running on port ${PORT}`));
