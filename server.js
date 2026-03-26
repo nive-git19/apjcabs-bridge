@@ -228,7 +228,9 @@ app.post('/send-summary', async (req, res) => {
       },
       body: JSON.stringify({
         message_parts: [{ text: { content: summary } }],
-        message_type : 'normal'
+        message_type : 'normal',
+        actor_type   : 'agent',
+        actor_id     : 'aae28b3c-7e8e-4d8e-839e-e3954fcb30e3'
       })
     });
 
